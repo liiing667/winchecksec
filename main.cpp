@@ -111,6 +111,25 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    auto reportError = [&](const std::string& path, const std::string& error, int code) {
+        if (json) {
+            nlohmann::json errorResult = {
+                {"path", path},
+                {"error",
+                 {
+                     {"message", error},
+                     {"code", code},
+                 }},
+            };
+            std::cout << errorResult << '\n';
+        } else {
+            std::cerr << "Error for: " << path << '\n';
+            std::cerr << "  code: " << code << '\n';
+            std::cerr << "  message: " << error << '\n';
+        }
+        return code;
+    };
+
     // TODO(ww): https://github.com/adishavit/argh/issues/57
     auto results = json::array();
     for (auto path = std::next(cmdl.begin()); path != cmdl.end(); ++path) {
@@ -124,13 +143,9 @@ int main(int argc, char* argv[]) {
                 std::cout << csec << '\n';
             }
         } catch (checksec::ChecksecError& error) {
-            std::cerr << error.what() << '\n';
-            usage(argv);
-            return 2;
+            return reportError(*path, error.what(), 2);
         } catch (...) {
-            std::cerr << "General error" << '\n';
-            usage(argv);
-            return 3;
+            return reportError(*path, "General error", 3);
         }
     }
 

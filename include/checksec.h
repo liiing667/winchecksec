@@ -246,6 +246,7 @@ class Checksec {
     std::uint64_t loadConfigSecurityCookie_ = 0;
     peparse::data_directory clrConfig_ = {0};
     std::uint16_t extendedDllCharacteristics_ = 0;
+    bool extendedDllCharacteristicsValid_ = false;
 };
 
 }  // namespace checksec

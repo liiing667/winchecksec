@@ -14,6 +14,95 @@
 
 namespace checksec {
 
+namespace {
+
+// IMAGE_DEBUG_TYPE_EX_DLLCHARACTERISTICS
+constexpr std::uint32_t kImageDebugTypeExDllCharacteristics = 20;
+
+enum class ExtendedDllCharacteristicsStatus {
+    Read,       // The extended DLL characteristics were read in full.
+    Absent,     // The image contains no EX_DLLCHARACTERISTICS debug directory.
+    Malformed,  // A matching debug directory exists but its data is unsafe.
+};
+
+/**
+ * Locate the EX_DLLCHARACTERISTICS debug directory and read the extended DLL
+ * characteristics it points to.
+ *
+ * `debugDirectories` is the raw, already-bounds-checked debug directory blob
+ * returned by pe-parse; it contains a sequence of `debug_dir_entry` structures.
+ * Every dereference is additionally checked against the underlying file buffer
+ * so that a truncated or otherwise malformed image can never cause an
+ * out-of-bounds read.
+ *
+ * @return an ExtendedDllCharacteristicsStatus describing whether the extended
+ *  DLL characteristics were read, were absent, or could not be read safely
+ */
+ExtendedDllCharacteristicsStatus readExtendedDllCharacteristics(
+    peparse::parsed_pe* pe, const std::vector<std::uint8_t>& debugDirectories,
+    std::uint16_t& extendedDllCharacteristics) {
+    auto* fileBuffer = pe->fileBuffer;
+    const auto fileBase = reinterpret_cast<std::uintptr_t>(fileBuffer->buf);
+    const std::uint32_t fileLength = fileBuffer->bufLen;
+
+    const std::size_t entryCount = debugDirectories.size() / sizeof(peparse::debug_dir_entry);
+    for (std::size_t i = 0; i < entryCount; ++i) {
+        peparse::debug_dir_entry debugDir{};
+        // Only whole debug directory entries are iterated; a trailing partial
+        // entry is ignored rather than read past the blob's bounds.
+        std::memcpy(&debugDir, debugDirectories.data() + (i * sizeof(peparse::debug_dir_entry)),
+                    sizeof(debugDir));
+
+        if (debugDir.Type != kImageDebugTypeExDllCharacteristics) {
+            continue;
+        }
+
+        if (debugDir.PointerToRawData == 0) {
+            continue;
+        }
+
+        // The EX_DLLCHARACTERISTICS payload must contain the full
+        // extended DLL characteristics value (a uint16_t). A declared
+        // SizeOfData smaller than that implies a truncated entry. Some
+        // linkers emit SizeOfData == 0, in which case the file-buffer span
+        // check below is the authoritative validation.
+        const std::uint32_t requiredSize = sizeof(extendedDllCharacteristics);
+        if (debugDir.SizeOfData != 0 && debugDir.SizeOfData < requiredSize) {
+            std::cerr << "Warn: undersized extended DLL characteristics data"
+                      << "\n";
+            return ExtendedDllCharacteristicsStatus::Malformed;
+        }
+
+        // Check the full span (not just the starting pointer) before
+        // dereferencing. Do the arithmetic in uintptr_t to avoid pointer
+        // overflow, and reject offsets that wrap or leave the file buffer.
+        const std::uintptr_t dataStart = fileBase + debugDir.PointerToRawData;
+        if (dataStart < fileBase || dataStart > fileBase + fileLength) {
+            std::cerr << "Warn: extended DLL characteristics pointer is out of bounds"
+                      << "\n";
+            return ExtendedDllCharacteristicsStatus::Malformed;
+        }
+
+        const std::uint32_t remaining =
+            static_cast<std::uint32_t>(fileBase + fileLength - dataStart);
+        if (remaining < sizeof(extendedDllCharacteristics)) {
+            std::cerr << "Warn: truncated extended DLL characteristics data"
+                      << "\n";
+            return ExtendedDllCharacteristicsStatus::Malformed;
+        }
+
+        std::memcpy(&extendedDllCharacteristics, reinterpret_cast<const void*>(dataStart),
+                    sizeof(extendedDllCharacteristics));
+        return ExtendedDllCharacteristicsStatus::Read;
+    }
+
+    // No EX_DLLCHARACTERISTICS debug directory: genuinely not present, which is
+    // distinct from a malformed one.
+    return ExtendedDllCharacteristicsStatus::Absent;
+}
+
+}  // namespace
+
 Checksec::Checksec(std::string filepath) : filepath_(filepath), loadedImage_(filepath) {
     peparse::nt_header_32 nt = loadedImage_.get()->peHeader.nt;
     peparse::file_header* imageFileHeader = &(nt.FileHeader);
@@ -73,30 +162,10 @@ Checksec::Checksec(std::string filepath) : filepath_(filepath), loadedImage_(fil
             return;
         }
 
-        peparse::debug_dir_entry debugDir{};
-        uint32_t numberOfDebugDirs = debugDirectories.size() / sizeof(debugDir);
-        auto debugDirSize = std::min(debugDirectories.size(), sizeof(debugDir));
-
-        for (int i = 0; i < numberOfDebugDirs; i++) {
-            // copy the current debug directory into debugDir
-            memcpy(&debugDir, debugDirectories.data() + (i * debugDirSize), debugDirSize);
-            // 20 == IMAGE_DEBUG_TYPE_EX_DLLCHARACTERISTICS
-            // For now we only care about this debug directory since it contains the CETCOMPAT bit
-            if (debugDir.Type == 20) {
-                if (debugDir.PointerToRawData != 0) {
-                    auto dataPtr = debugDir.PointerToRawData + loadedImage_.get()->fileBuffer->buf;
-                    if ((dataPtr < loadedImage_.get()->fileBuffer->buf) ||
-                        (dataPtr > loadedImage_.get()->fileBuffer->buf +
-                                       loadedImage_.get()->fileBuffer->bufLen)) {
-                        std::cerr << "Warn: dataPtr is out of bounds"
-                                  << "\n";
-                        extendedDllCharacteristics_ = 0;
-                        return;
-                    }
-                    extendedDllCharacteristics_ = *((uint16_t*)dataPtr);
-                }
-            }
-        }
+        extendedDllCharacteristicsValid_ =
+            readExtendedDllCharacteristics(loadedImage_.get(), debugDirectories,
+                                           extendedDllCharacteristics_) !=
+            ExtendedDllCharacteristicsStatus::Malformed;
     } else {
         peparse::optional_header_32* optionalHeader = &(nt.OptionalHeader);
         dllCharacteristics_ = optionalHeader->DllCharacteristics;
@@ -144,27 +213,10 @@ Checksec::Checksec(std::string filepath) : filepath_(filepath), loadedImage_(fil
             return;
         }
 
-        peparse::debug_dir_entry debugDir{};
-        auto numberOfDebugDirs = debugDirectories.size() / sizeof(debugDir);
-        auto debugDirSize = std::min(debugDirectories.size(), sizeof(debugDir));
-
-        for (int i = 0; i < numberOfDebugDirs; i++) {
-            memcpy(&debugDir, debugDirectories.data() + (i * debugDirSize), debugDirSize);
-            if (debugDir.Type == 20) {
-                if (debugDir.PointerToRawData != 0) {
-                    auto dataPtr = debugDir.PointerToRawData + loadedImage_.get()->fileBuffer->buf;
-                    if ((dataPtr < loadedImage_.get()->fileBuffer->buf) ||
-                        (dataPtr > loadedImage_.get()->fileBuffer->buf +
-                                       loadedImage_.get()->fileBuffer->bufLen)) {
-                        std::cerr << "Warn: dataPtr is out of bounds"
-                                  << "\n";
-                        extendedDllCharacteristics_ = 0;
-                        return;
-                    }
-                    extendedDllCharacteristics_ = *((uint16_t*)dataPtr);
-                }
-            }
-        }
+        extendedDllCharacteristicsValid_ =
+            readExtendedDllCharacteristics(loadedImage_.get(), debugDirectories,
+                                           extendedDllCharacteristics_) !=
+            ExtendedDllCharacteristicsStatus::Malformed;
     }
 }
 
@@ -332,6 +384,12 @@ const MitigationReport Checksec::isDotNET() const {
 }
 
 const MitigationReport Checksec::isCetCompat() const {
+    if (!extendedDllCharacteristicsValid_) {
+        return REPORT_EXPLAIN(NotImplemented, kCetDescription,
+                              "Extended DLL characteristics could not be read: the "
+                              "debug directory is missing or malformed.");
+    }
+
     if (extendedDllCharacteristics_ & peparse::IMAGE_DLLCHARACTERISTICS_EX_CET_COMPAT) {
         return REPORT(Present, kCetDescription);
     } else {

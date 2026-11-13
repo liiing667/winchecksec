@@ -165,3 +165,66 @@ TEST(Winchecksec, CetCompat64) {
 
     EXPECT_TRUE(checksec.isCetCompat());
 }
+
+TEST(Winchecksec, CetCompat32) {
+    auto *path = WINCHECKSEC_TEST_ASSETS "/32/pegoat-cetcompat.exe";
+
+    auto checksec = checksec::Checksec(path);
+
+    EXPECT_TRUE(checksec.isCetCompat());
+}
+
+TEST(Winchecksec, NoCetCompat32) {
+    auto *path = WINCHECKSEC_TEST_ASSETS "/32/pegoat.exe";
+
+    auto checksec = checksec::Checksec(path);
+
+    EXPECT_FALSE(checksec.isCetCompat());
+}
+
+// A malformed EX_DLLCHARACTERISTICS debug directory must never be reported as
+// Present or as a normal, clean absence. Each of these binaries contains a
+// type-20 debug directory whose payload cannot be read within the file's
+// bounds (or whose declared SizeOfData is too small), so CetCompat must be
+// reported as NotImplemented for both the 32- and 64-bit parse paths.
+TEST(Winchecksec, MalformedCetCompat64) {
+    const char *paths[] = {
+        WINCHECKSEC_TEST_ASSETS "/malformed/pegoat64-cetcompat-at-eof.exe",
+        WINCHECKSEC_TEST_ASSETS "/malformed/pegoat64-cetcompat-oob.exe",
+        WINCHECKSEC_TEST_ASSETS "/malformed/pegoat64-cetcompat-wrap.exe",
+        WINCHECKSEC_TEST_ASSETS "/malformed/pegoat64-cetcompat-forge-present.exe",
+        WINCHECKSEC_TEST_ASSETS "/malformed/pegoat64-cetcompat-sizeofdata-one.exe",
+    };
+
+    for (auto *path : paths) {
+        auto image = checksec::Checksec(path);
+
+        auto report = image.isCetCompat();
+        EXPECT_EQ(report.presence, checksec::MitigationPresence::NotImplemented) << path;
+        EXPECT_NE(report.presence, checksec::MitigationPresence::Present) << path;
+    }
+}
+
+TEST(Winchecksec, MalformedCetCompat32) {
+    const char *paths[] = {
+        WINCHECKSEC_TEST_ASSETS "/malformed/pegoat32-cetcompat-at-eof.exe",
+        WINCHECKSEC_TEST_ASSETS "/malformed/pegoat32-cetcompat-oob.exe",
+        WINCHECKSEC_TEST_ASSETS "/malformed/pegoat32-cetcompat-wrap.exe",
+        WINCHECKSEC_TEST_ASSETS "/malformed/pegoat32-cetcompat-forge-present.exe",
+        WINCHECKSEC_TEST_ASSETS "/malformed/pegoat32-cetcompat-sizeofdata-one.exe",
+    };
+
+    for (auto *path : paths) {
+        auto image = checksec::Checksec(path);
+
+        auto report = image.isCetCompat();
+        EXPECT_EQ(report.presence, checksec::MitigationPresence::NotImplemented) << path;
+        EXPECT_NE(report.presence, checksec::MitigationPresence::Present) << path;
+    }
+}
+
+TEST(Winchecksec, InvalidFileRaises) {
+    auto *path = WINCHECKSEC_TEST_ASSETS "/malformed/does-not-exist.exe";
+
+    EXPECT_THROW(checksec::Checksec image(path), checksec::ChecksecError);
+}
