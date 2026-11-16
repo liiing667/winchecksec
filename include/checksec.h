@@ -136,6 +136,19 @@ struct MitigationReport {
 };
 
 /**
+ * Models the Authenticode signing state of a binary.
+ *
+ * Unlike \ref MitigationPresence, this distinguishes between binaries that
+ * simply aren't signed and binaries that carry a signature that failed
+ * verification (e.g. a checksum mismatch or an incomplete certificate chain).
+ */
+enum class AuthenticodeState {
+    NotSigned, /**< The binary contains no Authenticode signature */
+    Invalid,   /**< The binary's Authenticode signature failed verification */
+    Valid,     /**< The binary's Authenticode signature is present and verified */
+};
+
+/**
  * Represents the main winchecksec interface.
  */
 class Checksec {
@@ -200,6 +213,16 @@ class Checksec {
      *       documentation for the details of this check
      */
     const MitigationReport isAuthenticode() const;
+
+    /**
+     * @return an AuthenticodeState indicating whether the program is unsigned,
+     *  carries an invalid Authenticode signature, or carries a valid one
+     *
+     * @note A signature is only \ref AuthenticodeState::Valid if its checksum
+     *  and PKCS#7 signature verify **and** its embedded certificates form a
+     *  complete chain (i.e. no missing intermediates).
+     */
+    AuthenticodeState authenticodeState() const;
 
     /**
      * @return a MitigationReport indicating whether the program supports Return Flow Guard

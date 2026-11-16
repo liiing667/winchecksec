@@ -21,7 +21,9 @@ target_include_directories(
   winchecksec PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
                      $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(winchecksec PRIVATE pe-parse::pe-parse uthenticode::uthenticode)
+# NOTE: pe-parse is a PUBLIC dependency because checksec.h exposes
+# peparse::parsed_pe in its public API.
+target_link_libraries(winchecksec PUBLIC pe-parse::pe-parse PRIVATE uthenticode::uthenticode)
 
 add_executable(winchecksec-bin checksec.cpp main.cpp)
 target_include_directories(
@@ -35,6 +37,8 @@ set_target_properties(winchecksec-bin PROPERTIES OUTPUT_NAME winchecksec)
 
 # gtest setup. Adapted roughly from the googletest README.
 if (BUILD_TESTS)
+  enable_testing()
+
   set(gtest_cmake_in "${CMAKE_CURRENT_SOURCE_DIR}/cmake/gtest.cmake.in")
   set(gtest_cmake "${CMAKE_CURRENT_BINARY_DIR}/googletest-download/CMakeLists.txt")
   configure_file("${gtest_cmake_in}" "${gtest_cmake}")

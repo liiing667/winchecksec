@@ -82,25 +82,50 @@ Authenticode    : "NotPresent"
 
 > .\Release\winchecksec.exe -j C:\Windows\notepad.exe
 
-[{
-   "path": "C:\\Windows\\notepad.exe",
-   "mitigations": {
-      "dynamicBase": {
-         "presence": "Present",
-         "description": "Binaries with dynamic base support can be dynamically rebased, enabling ASLR."
-      },
-      "rfg": {
-         "description": "Binaries with RFG enabled have additional return-oriented-programming protections.",
-         "presence": "NotPresent"
-      },
-      "seh": {
-         "description": "Binaries with SEH support can use structured exception handlers.",
-         "presence": "Present"
-      },
-      // ...
+{
+   "results": [{
+      "path": "C:\\Windows\\notepad.exe",
+      "mitigations": {
+         "dynamicBase": {
+            "presence": "Present",
+            "description": "Binaries with dynamic base support can be dynamically rebased, enabling ASLR."
+         },
+         "rfg": {
+            "description": "Binaries with RFG enabled have additional return-oriented-programming protections.",
+            "presence": "NotPresent"
+         },
+         "seh": {
+            "description": "Binaries with SEH support can use structured exception handlers.",
+            "presence": "Present"
+         },
+         // ...
+      }
+   }],
+   "summary": {
+      "total": 1,
+      "ok": 0,
+      "unsigned": 1,
+      "invalidSignature": 0,
+      "failed": 0
    }
-}]
+}
 ```
+
+Both output modes share the same per-file results: every input is processed even if others
+fail, and inputs that cannot be parsed produce an `{"path": ..., "error": ...}` entry in JSON
+mode (and an error message on stderr in plain-text mode). With multiple inputs, plain-text
+mode also prints a `Summary:` line with the same tallies as the JSON `summary` object.
+
+The process exit code reflects the most severe per-input outcome:
+
+| Code | Meaning |
+| ---- | ------- |
+| 0 | All inputs parsed; every signed input has a valid Authenticode signature |
+| 1 | Usage error |
+| 2 | At least one input has no Authenticode signature |
+| 3 | At least one input has an invalid Authenticode signature (bad checksum/signature or incomplete certificate chain) |
+| 4 | At least one input could not be parsed as a PE |
+| 5 | At least one input failed with an unexpected error |
 
 `winchecksec` also provides a C++ API; documentation is hosted
 [here](https://trailofbits.github.io/winchecksec/).

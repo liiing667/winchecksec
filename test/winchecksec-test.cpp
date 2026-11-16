@@ -165,3 +165,66 @@ TEST(Winchecksec, CetCompat64) {
 
     EXPECT_TRUE(checksec.isCetCompat());
 }
+
+TEST(Winchecksec, UnparsableInput) {
+    // A non-PE input must raise ChecksecError, making parse failures
+    // distinguishable from (un)signed states.
+    auto *path = WINCHECKSEC_TEST_ASSETS "/not-a-pe.txt";
+
+    EXPECT_THROW(
+        {
+            checksec::Checksec checksec(path);
+            (void)checksec;
+        },
+        checksec::ChecksecError);
+}
+
+TEST(Winchecksec, AuthenticodeUnsigned) {
+    for (auto *path : {WINCHECKSEC_TEST_ASSETS "/32/pegoat.exe",
+                       WINCHECKSEC_TEST_ASSETS "/64/pegoat.exe"}) {
+        auto checksec = checksec::Checksec(path);
+
+        EXPECT_EQ(checksec.authenticodeState(), checksec::AuthenticodeState::NotSigned);
+        EXPECT_FALSE(checksec.isAuthenticode());
+        EXPECT_TRUE(checksec.isAuthenticode().explanation.has_value());
+    }
+}
+
+TEST(Winchecksec, AuthenticodeValid) {
+    for (auto *path : {WINCHECKSEC_TEST_ASSETS "/32/pegoat-authenticode.exe",
+                       WINCHECKSEC_TEST_ASSETS "/64/pegoat-authenticode.exe"}) {
+        auto checksec = checksec::Checksec(path);
+
+        EXPECT_EQ(checksec.authenticodeState(), checksec::AuthenticodeState::Valid);
+        EXPECT_TRUE(checksec.isAuthenticode());
+    }
+}
+
+TEST(Winchecksec, AuthenticodeTampered) {
+    // These binaries have valid signatures over their original contents, but
+    // were modified afterwards: the signature must not verify.
+    for (auto *path : {WINCHECKSEC_TEST_ASSETS "/32/pegoat-authenticode-tampered.exe",
+                       WINCHECKSEC_TEST_ASSETS "/64/pegoat-authenticode-tampered.exe"}) {
+        auto checksec = checksec::Checksec(path);
+
+        EXPECT_EQ(checksec.authenticodeState(), checksec::AuthenticodeState::Invalid);
+        EXPECT_FALSE(checksec.isAuthenticode());
+    }
+}
+
+TEST(Winchecksec, AuthenticodeMissingIntermediate) {
+    // These binaries are signed with a leaf certificate whose issuing
+    // intermediate CA certificate is not embedded in the signature. The
+    // checksum and PKCS#7 signature verify, but the incomplete chain must
+    // not be reported as validly signed.
+    for (auto *path :
+         {WINCHECKSEC_TEST_ASSETS "/32/pegoat-authenticode-missing-intermediate.exe",
+          WINCHECKSEC_TEST_ASSETS "/64/pegoat-authenticode-missing-intermediate.exe"}) {
+        auto checksec = checksec::Checksec(path);
+
+        EXPECT_EQ(checksec.authenticodeState(), checksec::AuthenticodeState::Invalid);
+        EXPECT_FALSE(checksec.isAuthenticode());
+        EXPECT_NE(checksec.isAuthenticode().explanation.value_or("").find("chain"),
+                  std::string::npos);
+    }
+}

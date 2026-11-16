@@ -5,6 +5,8 @@
 
 #include <cstring>
 #include <ostream>
+#include <map>
+#include <set>
 #include <vector>
 #include <optional>
 
@@ -13,6 +15,104 @@
 #define REPORT(presence, description) REPORT_EXPLAIN(presence, description, std::nullopt)
 
 namespace checksec {
+
+namespace {
+
+/**
+ * The outcome of an Authenticode evaluation: a tri-state plus an optional
+ * human-readable explanation for non-Valid states.
+ */
+struct AuthenticodeVerdict {
+    AuthenticodeState state;
+    std::optional<std::string> explanation;
+};
+
+/**
+ * Returns true if every signer in the given SignedData chains up to a
+ * self-signed certificate using only the certificates embedded in the
+ * signature itself.
+ *
+ * uthenticode deliberately does not perform chain verification, so a
+ * signature whose chain is missing intermediate certificates would
+ * otherwise be reported as valid.
+ */
+bool authenticodeChainComplete(const uthenticode::SignedData& signedData) {
+    const auto signers = signedData.get_signers();
+    const auto certificates = signedData.get_certificates();
+    if (signers.empty() || certificates.empty()) {
+        return false;
+    }
+
+    // Map each embedded certificate's subject to its issuer.
+    std::map<std::string, std::string> issuers;
+    for (const auto& cert : certificates) {
+        issuers.emplace(cert.get_subject(), cert.get_issuer());
+    }
+
+    for (const auto& signer : signers) {
+        // Walk from the signer towards a self-signed certificate, following
+        // only issuer links that are present in the embedded certificates.
+        std::set<std::string> seen;
+        auto subject = signer.get_subject();
+        auto issuer = signer.get_issuer();
+        while (issuer != subject) {
+            if (!seen.insert(subject).second) {
+                // Cyclic chain; shouldn't happen with real certificates.
+                return false;
+            }
+            const auto next = issuers.find(issuer);
+            if (next == issuers.end()) {
+                // The issuer's certificate isn't embedded: the chain is
+                // missing an intermediate (or root) certificate.
+                return false;
+            }
+            subject = issuer;
+            issuer = next->second;
+        }
+    }
+
+    return true;
+}
+
+AuthenticodeVerdict authenticodeVerdict(peparse::parsed_pe* pe) {
+    const auto certs = uthenticode::read_certs(pe);
+
+    bool hasSignedData = false;
+    bool chainComplete = true;
+    for (const auto& cert : certs) {
+        const auto signedData = cert.as_signed_data();
+        if (!signedData) {
+            continue;
+        }
+
+        hasSignedData = true;
+        chainComplete = chainComplete && authenticodeChainComplete(*signedData);
+
+        if (const auto nested = signedData->get_nested_signed_data()) {
+            chainComplete = chainComplete && authenticodeChainComplete(*nested);
+        }
+    }
+
+    if (!hasSignedData) {
+        return {AuthenticodeState::NotSigned,
+                "Binary does not contain an Authenticode signature."};
+    }
+
+    if (!uthenticode::verify(pe)) {
+        return {AuthenticodeState::Invalid,
+                "Binary's Authenticode signature failed verification."};
+    }
+
+    if (!chainComplete) {
+        return {AuthenticodeState::Invalid,
+                "Binary's Authenticode certificate chain is incomplete (missing "
+                "intermediate certificates?)."};
+    }
+
+    return {AuthenticodeState::Valid, std::nullopt};
+}
+
+}  // namespace
 
 Checksec::Checksec(std::string filepath) : filepath_(filepath), loadedImage_(filepath) {
     peparse::nt_header_32 nt = loadedImage_.get()->peHeader.nt;
@@ -259,11 +359,16 @@ const MitigationReport Checksec::isCFG() const {
 }
 
 const MitigationReport Checksec::isAuthenticode() const {
-    if (uthenticode::verify(loadedImage_.get())) {
+    const auto verdict = authenticodeVerdict(loadedImage_.get());
+    if (verdict.state == AuthenticodeState::Valid) {
         return REPORT(Present, kAuthenticodeDescription);
     } else {
-        return REPORT(NotPresent, kAuthenticodeDescription);
+        return REPORT_EXPLAIN(NotPresent, kAuthenticodeDescription, verdict.explanation);
     }
+}
+
+AuthenticodeState Checksec::authenticodeState() const {
+    return authenticodeVerdict(loadedImage_.get()).state;
 }
 
 const MitigationReport Checksec::isRFG() const {
