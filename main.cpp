@@ -19,6 +19,10 @@ void to_json(json& j, const MitigationPresence& p) {
             j = "NotPresent";
             break;
         }
+        case MitigationPresence::Unknown: {
+            j = "Unknown";
+            break;
+        }
         case MitigationPresence::NotApplicable: {
             j = "NotApplicable";
             break;

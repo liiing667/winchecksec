@@ -106,6 +106,7 @@ class LoadedImage {
 enum class MitigationPresence {
     Present,        /**< The mitigation is present */
     NotPresent,     /**< The mitigation is not present */
+    Unknown,        /**< The mitigation's presence cannot be proven */
     NotApplicable,  /**< The mitigation is not applicable on this input */
     NotImplemented, /**< Support for detecting this mitigation is not implemented */
 };

@@ -158,6 +158,80 @@ TEST(Winchecksec, NoCetCompat64) {
     EXPECT_FALSE(checksec.isCetCompat());
 }
 
+TEST(Winchecksec, SafeSEHNotApplicable64) {
+    auto *path = WINCHECKSEC_TEST_ASSETS "/64/pegoat.exe";
+
+    auto checksec = checksec::Checksec(path);
+
+    EXPECT_EQ(checksec.isSafeSEH().presence, checksec::MitigationPresence::NotApplicable);
+}
+
+TEST(Winchecksec, SafeSEHNotPresent32) {
+    // The stock pegoat load config directory is too short to carry the
+    // SafeSEH fields, so the check stays NotPresent.
+    {
+        auto *path = WINCHECKSEC_TEST_ASSETS "/32/pegoat.exe";
+
+        auto checksec = checksec::Checksec(path);
+
+        EXPECT_EQ(checksec.isSafeSEH().presence, checksec::MitigationPresence::NotPresent);
+    }
+
+    // An empty handler table/count means SafeSEH is not in effect.
+    {
+        auto *path = WINCHECKSEC_TEST_ASSETS "/32/pegoat-no-safeseh.exe";
+
+        auto checksec = checksec::Checksec(path);
+
+        EXPECT_EQ(checksec.isSafeSEH().presence, checksec::MitigationPresence::NotPresent);
+    }
+}
+
+TEST(Winchecksec, SafeSEHPresent32) {
+    auto *path = WINCHECKSEC_TEST_ASSETS "/32/pegoat-safeseh-valid.exe";
+
+    auto checksec = checksec::Checksec(path);
+
+    EXPECT_EQ(checksec.isSafeSEH().presence, checksec::MitigationPresence::Present);
+    EXPECT_TRUE(checksec.isSafeSEH());
+}
+
+TEST(Winchecksec, SafeSEHUnknown32) {
+    // A non-zero table pointer with a zero count is malformed.
+    {
+        auto *path = WINCHECKSEC_TEST_ASSETS "/32/pegoat-safeseh-inconsistent.exe";
+
+        auto checksec = checksec::Checksec(path);
+
+        EXPECT_EQ(checksec.isSafeSEH().presence, checksec::MitigationPresence::Unknown);
+        EXPECT_FALSE(checksec.isSafeSEH());
+        EXPECT_TRUE(checksec.isSafeSEH().explanation.has_value());
+    }
+
+    // A handler table that straddles a section boundary cannot be read as one
+    // contiguous table, so presence cannot be proven.
+    {
+        auto *path = WINCHECKSEC_TEST_ASSETS "/32/pegoat-safeseh-cross-section.exe";
+
+        auto checksec = checksec::Checksec(path);
+
+        EXPECT_EQ(checksec.isSafeSEH().presence, checksec::MitigationPresence::Unknown);
+        EXPECT_FALSE(checksec.isSafeSEH());
+        EXPECT_TRUE(checksec.isSafeSEH().explanation.has_value());
+    }
+
+    // A handler table whose entries run past the file buffer is truncated.
+    {
+        auto *path = WINCHECKSEC_TEST_ASSETS "/32/pegoat-safeseh-truncated.exe";
+
+        auto checksec = checksec::Checksec(path);
+
+        EXPECT_EQ(checksec.isSafeSEH().presence, checksec::MitigationPresence::Unknown);
+        EXPECT_FALSE(checksec.isSafeSEH());
+        EXPECT_TRUE(checksec.isSafeSEH().explanation.has_value());
+    }
+}
+
 TEST(Winchecksec, CetCompat64) {
     auto *path = WINCHECKSEC_TEST_ASSETS "/64/pegoat-cetcompat.exe";
 

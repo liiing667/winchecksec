@@ -6,6 +6,8 @@
 #include <cstring>
 #include <ostream>
 #include <vector>
+#include <cstdint>
+#include <limits>
 #include <optional>
 
 #define REPORT_EXPLAIN(presence, description, explanation) \
@@ -293,18 +295,123 @@ const MitigationReport Checksec::isSafeSEH() const {
     }
 
     // NOTE(ww): a load config under 72/112 bytes implies the absence of the
-    // SafeSEH fields.
+    // SafeSEH fields. See:
+    // https://docs.microsoft.com/en-us/windows/win32/debug/pe-format#load-configuration-layout
     if (loadConfigSize_ < 112 &&
         !(imageCharacteristics_ & peparse::IMAGE_FILE_32BIT_MACHINE && loadConfigSize_ >= 72)) {
         return REPORT_EXPLAIN(NotPresent, kSafeSEHDescription,
                               "Image load config is too short to contain a SE handler table.");
     }
 
-    if (isSEH() && loadConfigSEHandlerTable_ != 0 && loadConfigSEHandlerCount_ != 0) {
-        return REPORT(Present, kSafeSEHDescription);
-    } else {
+    // A non-zero table pointer must be paired with a non-zero count and vice
+    // versa. An inconsistent pair is malformed: neither presence nor absence
+    // can be proven, so report Unknown rather than guessing.
+    if ((loadConfigSEHandlerTable_ == 0) != (loadConfigSEHandlerCount_ == 0)) {
+        return REPORT_EXPLAIN(Unknown, kSafeSEHDescription,
+                              "Load config has an inconsistent SE handler table pointer and "
+                              "handler count.");
+    }
+
+    // No registered handlers means SafeSEH is not in effect.
+    if (loadConfigSEHandlerTable_ == 0 && loadConfigSEHandlerCount_ == 0) {
         return REPORT(NotPresent, kSafeSEHDescription);
     }
+
+    // SEHandlerTable is an RVA on x86.
+    const auto tableRva = static_cast<std::uint64_t>(loadConfigSEHandlerTable_);
+
+    // Each entry is a 32-bit RVA. Refuse to reason about counts that would
+    // overflow the byte size of the table or the address space.
+    if (loadConfigSEHandlerCount_ >
+        std::numeric_limits<std::uint32_t>::max() / sizeof(std::uint32_t)) {
+        return REPORT_EXPLAIN(Unknown, kSafeSEHDescription,
+                              "SE handler count would overflow the handler table range.");
+    }
+    const auto count = static_cast<std::uint32_t>(loadConfigSEHandlerCount_);
+    const auto tableSize = static_cast<std::uint64_t>(count) * sizeof(std::uint32_t);
+    const auto tableEnd = tableRva + tableSize;
+    if (tableEnd < tableRva || tableEnd > std::numeric_limits<std::uint32_t>::max()) {
+        return REPORT_EXPLAIN(Unknown, kSafeSEHDescription,
+                              "SE handler table range wraps or exceeds the image address space.");
+    }
+
+    // Collect the section map so RVAs can be resolved to file offsets and
+    // checked for readability/reachability.
+    std::vector<peparse::image_section_header> sections;
+    peparse::IterSec(
+        loadedImage_.get(),
+        [](void* ctx, const peparse::VA&, const std::string&,
+           const peparse::image_section_header& header, const peparse::bounded_buffer*) -> int {
+            static_cast<std::vector<peparse::image_section_header>*>(ctx)->push_back(header);
+            return 0;
+        },
+        &sections);
+
+    // A range [rva, rva + size) must lie fully inside one section. Sections
+    // don't overlap in a well-formed image; a range crossing a boundary (or
+    // outside every section) fails the containment check.
+    const auto sectionForRange =
+        [&sections](std::uint32_t rva, std::uint64_t size) -> const peparse::image_section_header* {
+        for (const auto& header : sections) {
+            const auto start = static_cast<std::uint64_t>(header.VirtualAddress);
+            const auto span =
+                std::max<std::uint64_t>(header.Misc.VirtualSize, header.SizeOfRawData);
+            if (rva >= start && rva + size <= start + span) {
+                return &header;
+            }
+        }
+        return nullptr;
+    };
+
+    const auto* tableSection = sectionForRange(static_cast<std::uint32_t>(tableRva), tableSize);
+    if (tableSection == nullptr) {
+        return REPORT_EXPLAIN(Unknown, kSafeSEHDescription,
+                              "SE handler table range is not fully contained within a single "
+                              "image section.");
+    }
+    if (!(tableSection->Characteristics & peparse::IMAGE_SCN_MEM_READ)) {
+        return REPORT_EXPLAIN(Unknown, kSafeSEHDescription,
+                              "SE handler table is not in a readable image section.");
+    }
+
+    const auto rvaInSomeSection = [&sections](std::uint32_t rva) -> bool {
+        for (const auto& header : sections) {
+            const auto start = static_cast<std::uint64_t>(header.VirtualAddress);
+            const auto span =
+                std::max<std::uint64_t>(header.Misc.VirtualSize, header.SizeOfRawData);
+            if (rva >= start && rva < start + span) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // Resolve the table's file offset: section raw data starts at
+    // PointerToRawData and the table is at (tableRva - section VA).
+    const auto tableFileOffset =
+        tableSection->PointerToRawData +
+        (static_cast<std::uint32_t>(tableRva) - tableSection->VirtualAddress);
+
+    // Each entry is a handler RVA and must resolve to a reachable section.
+    // A truncated table (an entry that can't be read from the file buffer)
+    // or an out-of-section handler RVA yields Unknown instead of a false
+    // Present.
+    auto* buffer = loadedImage_.get()->fileBuffer;
+    for (std::uint32_t index = 0; index < count; ++index) {
+        std::uint32_t handlerRva = 0;
+        const auto entryOffset =
+            tableFileOffset + index * static_cast<std::uint32_t>(sizeof(std::uint32_t));
+        if (!peparse::readDword(buffer, entryOffset, handlerRva)) {
+            return REPORT_EXPLAIN(Unknown, kSafeSEHDescription,
+                                  "SE handler table is truncated: an entry cannot be read.");
+        }
+        if (!rvaInSomeSection(handlerRva)) {
+            return REPORT_EXPLAIN(Unknown, kSafeSEHDescription,
+                                  "SE handler entry points outside of every image section.");
+        }
+    }
+
+    return REPORT(Present, kSafeSEHDescription);
 }
 
 const MitigationReport Checksec::isGS() const {
